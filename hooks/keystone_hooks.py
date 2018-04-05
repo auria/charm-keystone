@@ -19,6 +19,7 @@ import json
 import os
 import sys
 
+from glob import glob
 from subprocess import check_call
 
 from charmhelpers.contrib import unison
@@ -40,6 +41,7 @@ from charmhelpers.core.hookenv import (
     status_set,
     open_port,
     is_leader,
+    is_relation_made,
 )
 
 from charmhelpers.core.host import (
@@ -48,6 +50,7 @@ from charmhelpers.core.host import (
     service_stop,
     service_start,
     service_restart,
+    rsync,
 )
 
 from charmhelpers.core.strutils import (
@@ -161,6 +164,8 @@ from charmhelpers.contrib.hardening.harden import harden
 
 hooks = Hooks()
 CONFIGS = register_configs()
+
+NAGIOS_PLUGINS = '/usr/local/lib/nagios/plugins'
 
 
 @hooks.hook('install.real')
@@ -790,6 +795,7 @@ def domain_backend_changed(relation_id=None, unit=None):
                     service_restart(keystone_service())
             db.set(domain_nonce_key, restart_nonce)
             db.flush()
+    update_nrpe_ldap_config()
 
 
 @synchronize_ca_if_changed(fatal=True)
@@ -849,6 +855,29 @@ def update_status():
     log('Updating status.')
 
 
+def update_nrpe_ldap_config():
+    if is_leader() and \
+       is_relation_made('nrpe-external-master') and \
+       is_relation_made('domain-backend'):
+        if os.path.isdir(NAGIOS_PLUGINS):
+            rsync(os.path.join(os.getenv('CHARM_DIR'),
+                               'files', 'nagios', 'check_ldap.py'),
+                  os.path.join(NAGIOS_PLUGINS, 'check_ldap.py'))
+        apt_install('python3-ldap')
+        nrpe_setup = nrpe.NRPE(hostname=nrpe.get_nagios_hostname())
+        desc = 'ldap check for {} domain'
+        cmd = '{}/check_ldap.py {}'
+        filenames = glob('/etc/keystone/domains/keystone.*.conf')
+        if len(filenames) > 0:
+            for filename in filenames:
+                domain = os.path.basename(filename)[9:-5]
+                nrpe_setup.add_check(shortname='check_ldap_{}'.format(domain),
+                                     description=desc.format(domain),
+                                     check_cmd=cmd.format(NAGIOS_PLUGINS,
+                                                          domain))
+            nrpe_setup.write()
+
+
 @hooks.hook('nrpe-external-master-relation-joined',
             'nrpe-external-master-relation-changed')
 def update_nrpe_config():
@@ -866,6 +895,7 @@ def update_nrpe_config():
     nrpe.add_init_service_checks(nrpe_setup, _services, current_unit)
     nrpe.add_haproxy_checks(nrpe_setup, current_unit)
     nrpe_setup.write()
+    update_nrpe_ldap_config()
 
 
 def main():
